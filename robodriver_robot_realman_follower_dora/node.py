@@ -1,439 +1,162 @@
-import time
-import torch
 import logging_mp
+import threading
+import cv2
+import queue
+import json
 import numpy as np
-
-from typing import Any
-from functools import cached_property
-
-from lerobot.cameras import make_cameras_from_configs
-from lerobot.utils.errors import DeviceNotConnectedError, DeviceAlreadyConnectedError
-from lerobot.robots.robot import Robot
-
-from .config import RealManFollowerDoraRobotConfig
-from .status import RealManFollowerDoraRobotStatus
-from .node import RealManFollowerDoraRobotNode
+import pyarrow as pa
+import time
+from dora import Node
+from typing import Any, Dict
 
 
 logger = logging_mp.get_logger(__name__)
+CONNECT_TIMEOUT_FRAME = 10
 
 
-class RealManFollowerDoraRobot(Robot):
-    config_class = RealManFollowerDoraRobotConfig
-    name = "realman_follower_dora"
+class RobotNode:
+    pass
 
+class DoraRobotNode(RobotNode):
+    pass
 
-    def __init__(self, config: RealManFollowerDoraRobotConfig):
-        super().__init__(config)
-        self.config = config
-        self.robot_type = self.config.type
-        self.use_videos = self.config.use_videos
-        self.microphones = self.config.microphones
-
-        self.follower_arms = {}
-        self.follower_arms['main_follower'] = self.config.follower_arms["main"]
-        self.motors = config.motors
-
-        self.cameras = make_cameras_from_configs(self.config.cameras)
+class RealManFollowerDoraRobotNode(DoraRobotNode):
+    def __init__(self):
+        self.node = Node("realman_follower_dora")
         
-        self.connect_excluded_cameras = ["image_pika_pose"]
+        self.send_queue = queue.Queue(maxsize=100)
+        self.recv_images: Dict[str, float] = {}
+        self.recv_joint: Dict[str, float] = {}
+        self.recv_images_status: Dict[str, int] = {}
+        self.recv_joint_status: Dict[str, int] = {}
+        self.lock = threading.Lock()
 
-        self.status = RealManFollowerDoraRobotStatus()
-        self.robot_dora_node = RealManFollowerDoraRobotNode()
-        self.robot_dora_node.start()
+        self.thread = threading.Thread(target=self.dora_recv, daemon=True)
+        self.running = False
 
-        
-        self.connected = False
-        self.logs = {}
+        self.last_send_time = time.time()
 
+    def dora_send(self, event_id, data):
+        """线程安全的发送方法 - 只负责入队"""
+        # logger.debug(f"{self} queue send event_id:{event_id}, value:{data}")
+        try:
+            # 限制发送频率 (可选)
+            if time.time() - self.last_send_time < 0.005:  # 200Hz上限
+                return
+            # 转换为列表确保类型安全
+            data_list = [float(x) for x in data]
+            self.send_queue.put_nowait((event_id, data_list))
 
-    @property
-    def _motors_ft(self) -> dict[str, type]:
-        return {f"{motor}.pos": float for motor in self.motors}
+            self.last_send_time = time.time()
+        except queue.Full:
+            logger.warning(f"Send queue full! Dropping {event_id} event")
+        except Exception as e:
+            logger.error(f"Queue error: {str(e)}")
 
-    @property
-    def _cameras_ft(self) -> dict[str, tuple]:
-        return {
-            cam: (self.config.cameras[cam].height, self.config.cameras[cam].width, 3) for cam in self.cameras
-        }
+    def dora_recv(self):
+        """统一处理接收和发送的线程 - 确保所有Node操作在单线程完成"""
+        logger.info(f"{self} starting receive thread")
+        logger.debug(f"Queue size: {self.send_queue.qsize()}, Running: {self.running}")
+        while self.running:
 
-    @cached_property
-    def observation_features(self) -> dict[str, type | tuple]:
-        return {**self._motors_ft, **self._cameras_ft}
-
-    @cached_property
-    def action_features(self) -> dict[str, type]:
-        return self._motors_ft
-    
-
-    # def get_motor_names(self, arms: dict[str, dict]) -> list:
-    #     return [f"{arm}_{motor}" for arm, bus in arms.items() for motor in bus.motors]
-
-    # @property
-    # def camera_features(self) -> dict:
-    #     cam_ft = {}
-    #     for cam_key, cam in self.cameras.items():
-    #         key = f"observation.images.{cam_key}"
-    #         cam_ft[key] = {
-    #             "shape": (cam.height, cam.width, cam.channels),
-    #             "names": ["height", "width", "channels"],
-    #             "info": None,
-    #         }
-    #     return cam_ft
-    
-    # @property
-    # def microphone_features(self) -> dict:
-    #     mic_ft = {}
-    #     for mic_key, mic in self.microphones.items():
-    #         key = f"observation.audio.{mic_key}"
-    #         mic_ft[key] = {
-    #             "shape": (1,),
-    #             "names": ["channels"],
-    #             "info": None,
-    #         }
-    #     return mic_ft
-    
-    # @property
-    # def motor_features(self) -> dict:
-    #     action_names = self.get_motor_names(self.leader_arms)
-    #     state_names = self.get_motor_names(self.follower_arms)
-    #     return {
-    #         "action": {
-    #             "dtype": "float32",
-    #             "shape": (len(action_names),),
-    #             "names": action_names,
-    #         },
-    #         "observation.state": {
-    #             "dtype": "float32",
-    #             "shape": (len(state_names),),
-    #             "names": state_names,
-    #         },
-    #     }
-    
-    @property
-    def is_connected(self) -> bool:
-        return self.connected
-    
-    def connect(self):
-        timeout = 20  # 统一的超时时间（秒）
-        start_time = time.perf_counter()
-
-        if self.connected:
-            raise DeviceAlreadyConnectedError(f"{self} already connected")
-
-        # 定义所有需要等待的条件及其错误信息
-        conditions = [
-            (
-                lambda: all(name in self.robot_dora_node.recv_images for name in self.cameras if name not in self.connect_excluded_cameras),
-                lambda: [name for name in self.cameras if name not in self.robot_dora_node.recv_images],
-                "等待摄像头图像超时"
-            ),
-            # (
-            #     lambda: all(
-            #         any(name in key for key in self.robot_dora_node.recv_joint)
-            #         for name in self.leader_arms
-            #     ),
-            #     lambda: [name for name in self.leader_arms if not any(name in key for key in self.robot_dora_node.recv_joint)],
-            #     "等待主臂关节角度超时"
-            # ),
-            (
-                lambda: all(
-                    any(name in key for key in self.robot_dora_node.recv_joint)
-                    for name in self.motors
-                ),
-                lambda: [name for name in self.motors if not any(name in key for key in self.robot_dora_node.recv_joint)],
-                "等待从臂关节角度超时"
-            ),
-        ]
-
-        # 跟踪每个条件是否已完成
-        completed = [False] * len(conditions)
-
-        while True:
-            # 检查每个未完成的条件
-            for i in range(len(conditions)):
-                if not completed[i]:
-                    condition_func = conditions[i][0]
-                    if condition_func():
-                        completed[i] = True
-
-            # 如果所有条件都已完成，退出循环
-            if all(completed):
-                break
-
-            # 检查是否超时
-            if time.perf_counter() - start_time > timeout:
-                failed_messages = []
-                for i in range(len(completed)):
-                    if not completed[i]:
-                        condition_func, get_missing, base_msg = conditions[i]
-                        missing = get_missing()
-
-                        # 重新检查条件是否满足（可能刚好在最后一次检查后满足）
-                        if condition_func():
-                            completed[i] = True
-                            continue
-
-                        # 如果没有 missing，也视为满足
-                        if not missing:
-                            completed[i] = True
-                            continue
-
-                        # 计算已接收的项
-                        if i == 0:
-                            received = [name for name in self.cameras if name not in missing]
-                        else:
-                            received = [name for name in self.motors if name not in missing]
-
-                        # 构造错误信息
-                        msg = f"{base_msg}: 未收到 [{', '.join(missing)}]; 已收到 [{', '.join(received)}]"
-                        failed_messages.append(msg)
-
-                # 如果所有条件都已完成，break
-                if not failed_messages:
+            if self.send_queue.qsize() > 50:
+                logger.warning(f"Send queue backing up! Size: {self.send_queue.qsize()}")
+            # 1. 先处理所有待发送的消息
+            while not self.send_queue.empty():
+                try:
+                    event_id, data = self.send_queue.get_nowait()
+                    # 关键：在单线程环境中转换为PyArrow
+                    arrow_array = pa.array(list(map(float, data)), type=pa.float32())
+                    # logger.debug(f"{self} \nsend event_id: {event_id}, \nvalue: {data}")
+                    self.node.send_output(event_id, arrow_array)
+                    self.send_queue.task_done()
+                except queue.Empty:
                     break
+                except Exception as e:
+                    logger.error(f"Send error: {str(e)}")
+                    self.send_queue.task_done()  # 防止卡死
 
-                # 抛出超时异常
-                raise TimeoutError(f"连接超时，未满足的条件: {'; '.join(failed_messages)}")
-
-            # 减少 CPU 占用
-            time.sleep(0.01)
-
-        # ===== 新增成功打印逻辑 =====
-        success_messages = []
-        # 摄像头连接状态
-        if conditions[0][0]():
-            cam_received = [name for name in self.cameras 
-                        if name in self.robot_dora_node.recv_images and name not in self.connect_excluded_cameras]
-            success_messages.append(f"摄像头: {', '.join(cam_received)}")
-
-        # # 主臂数据状态
-        # arm_data_types = ["主臂关节角度",]
-        # for i, data_type in enumerate(arm_data_types, 1):
-        #     if conditions[i][0]():
-        #         arm_received = [name for name in self.leader_arms 
-        #                     if any(name in key for key in (self.robot_dora_node.recv_joint,)[i-1])]
-        #         success_messages.append(f"{data_type}: {', '.join(arm_received)}")
-        
-        # 从臂数据状态
-        arm_data_types = ["从臂关节角度",]
-        for i, data_type in enumerate(arm_data_types, 1):
-            if conditions[i][0]():
-                arm_received = [name for name in self.motors 
-                            if any(name in key for key in (self.robot_dora_node.recv_joint,)[i-1])]
-                success_messages.append(f"{data_type}: {', '.join(arm_received)}")
-        
-        log_message = "\n[连接成功] 所有设备已就绪:\n"
-        log_message += "\n".join(f"  - {msg}" for msg in success_messages)
-        log_message += f"\n  总耗时: {time.perf_counter() - start_time:.2f} 秒\n"
-        logger.info(log_message)
-        # ===========================
-
-        for i in range(self.status.specifications.camera.number):
-            self.status.specifications.camera.information[i].is_connect = True
-        for i in range(self.status.specifications.arm.number):
-            self.status.specifications.arm.information[i].is_connect = True
-
-        self.connected = True
-    
-    @property
-    def is_calibrated(self) -> bool:
-        """Whether the robot is currently calibrated or not. Should be always `True` if not applicable"""
-        return True
-
-    def calibrate(self) -> None:
-        """
-        Calibrate the robot if applicable. If not, this should be a no-op.
-
-        This method should collect any necessary data (e.g., motor offsets) and update the
-        :pyattr:`calibration` dictionary accordingly.
-        """
-        pass
-
-    def configure(self) -> None:
-        """
-        Apply any one-time or runtime configuration to the robot.
-        This may include setting motor parameters, control modes, or initial state.
-        """
-        pass
-    # @property
-    # def features(self):
-    #     return {**self.motor_features, **self.camera_features}
-
-    # @property
-    # def has_camera(self):
-    #     return len(self.cameras) > 0
-
-    # @property
-    # def num_cameras(self):
-    #     return len(self.cameras)
-    
-    # def teleop_step(
-    #     self, record_data=False, 
-    # ) -> None | tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
-
-    #     if not self.connected:
-    #         raise DeviceNotConnectedError(
-    #             "Aloha is not connected. You need to run `robot.connect()`."
-    #         )
-        
-    #     for key in self.robot_dora_node.recv_images_status:
-    #         self.robot_dora_node.recv_images_status[key] = max(0, self.robot_dora_node.recv_images_status[key] - 1)
-
-    #     for key in self.robot_dora_node.recv_joint_status:
-    #         self.robot_dora_node.recv_joint_status[key] = max(0, self.robot_dora_node.recv_joint_status[key] - 1)
-
-    #     if not record_data:
-    #         return
-
-    #     follower_joint = {}
-    #     for name in self.follower_arms:
-    #         for match_name in self.robot_dora_node.recv_joint:
-    #             if name in match_name:
-    #                 now = time.perf_counter()
-
-    #                 byte_array = np.zeros(6, dtype=np.float32)
-    #                 pose_read = self.robot_dora_node.recv_joint[match_name]
-
-    #                 byte_array[:6] = pose_read[:]
-    #                 byte_array = np.round(byte_array, 3)
+            # 2. 再处理接收事件 (非阻塞模式)
+            try:
+                event = self.node.next(timeout=0.001)  # 1ms超时
+                if event is None:
+                    continue
                     
-    #                 follower_joint[name] = torch.from_numpy(byte_array)
-
-    #                 self.logs[f"read_follower_{name}_joint_dt_s"] = time.perf_counter() - now
+                if event["type"] == "INPUT":
+                    self._handle_input_event(event)
+                elif event["type"] == "STOP":
+                    break
                     
-    #     leader_joint = {}
-    #     for name in self.leader_arms:
-    #         for match_name in self.robot_dora_node.recv_joint:
-    #             if name in match_name:
-    #                 now = time.perf_counter()
+            except Exception as e:
+                if self.running:  # 避免在停止时记录无用错误
+                    logger.error(f"Receive error: {str(e)}")
 
-    #                 byte_array = np.zeros(6, dtype=np.float32)
-    #                 pose_read = self.robot_dora_node.recv_joint[match_name]
+        logger.warning(f"{self} receive thread stopped.")
 
-    #                 byte_array[:6] = pose_read[:]
-    #                 byte_array = np.round(byte_array, 3)
-                    
-    #                 leader_joint[name] = torch.from_numpy(byte_array)
+    def _handle_input_event(self, event):
+        """处理输入事件 - 保持线程安全"""
+        event_id = event["id"]
+        data = event["value"].to_numpy()
+        meta_data = event["metadata"]
 
-    #                 self.logs[f"read_leader_{name}_joint_dt_s"] = time.perf_counter() - now
+        with self.lock:
+            # logger.debug(f"{self} recv event_id:{event_id}, value:{data}")
+            if 'image' in event_id:
+                self._process_image(event_id, data, meta_data)
+            elif 'joint' in event_id:
+                self._process_joint(event_id, data)
 
-    #     #记录当前关节角度
-    #     state = []
-    #     for name in self.follower_arms:
-    #         if name in follower_joint:
-    #             state.append(follower_joint[name])
-    #     state = torch.cat(state)
+    def _process_image(self, event_id, data, meta_data):
+        """处理图像数据"""
+        encoding = meta_data["encoding"].lower()
+        width = meta_data["width"]
+        height = meta_data["height"]
+        frame = None
 
-    #     #将关节目标位置添加到 action 列表中
-    #     action = []
-    #     for name in self.leader_arms:
-    #         if name in leader_joint:
-    #             action.append(leader_joint[name])
-    #     action = torch.cat(action)
+        try:
+            if encoding == "bgr8":
+                frame = data.reshape((height, width, 3))
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            elif encoding == "rgb8":
+                frame = data.reshape((height, width, 3))
+            elif encoding in ["jpeg", "jpg", "jpe", "bmp", "webp", "png"]:
+                frame = cv2.imdecode(data, cv2.IMREAD_COLOR)
+        except Exception as e:
+            logger.error(f"Image decode error ({encoding}): {str(e)}")
 
-    #     # Capture images from cameras
-    #     images = {}
-    #     for name in self.cameras:
-    #         now = time.perf_counter()
-    #         images[name] = self.robot_dora_node.recv_images[name]
-    #         images[name] = torch.from_numpy(images[name])
-    #         self.logs[f"read_camera_{name}_dt_s"] = time.perf_counter() - now
+        if frame is not None:
+            self.recv_images[event_id] = frame
+            self.recv_images_status[event_id] = CONNECT_TIMEOUT_FRAME
 
-    #     # Populate output dictionnaries and format to pytorch
-    #     obs_dict, action_dict = {}, {}
-    #     obs_dict["observation.state"] = state
-    #     action_dict["action"] = action
-    #     for name in self.cameras:
-    #         obs_dict[f"observation.images.{name}"] = images[name]
+    def _process_joint(self, event_id, data):
+        """处理关节数据"""
+        if data is not None:
+            scalar_value = float(data.item())
+            self.recv_joint[event_id] = scalar_value
+            self.recv_joint_status[event_id] = CONNECT_TIMEOUT_FRAME
 
-    #     # print("end teleoperate record")
-    #     return obs_dict, action_dict
-    
-    def get_observation(self) -> dict[str, Any]:
-        if not self.connected:
-            raise DeviceNotConnectedError(f"{self} is not connected.")
+    def start(self):
+        """Start Dora node thread"""
+        if self.running:
+            logger.warning(f"{self} is already running.")
+            return
 
-        for key in self.robot_dora_node.recv_images_status:
-            self.robot_dora_node.recv_images_status[key] = max(0, self.robot_dora_node.recv_images_status[key] - 1)
+        self.running = True
+        self.thread.start()
 
-        for key in self.robot_dora_node.recv_joint_status:
-            self.robot_dora_node.recv_joint_status[key] = max(0, self.robot_dora_node.recv_joint_status[key] - 1)
+        logger.info(f"{self} started. Waiting for images and sensor data...")
 
-        # Read arm position
-        start = time.perf_counter()
-        obs_dict = {
-            f"{motor}.pos": val 
-            for name, val in self.robot_dora_node.recv_joint.items() 
-                for motor in self.motors
-                    if motor in name
-        }
-        dt_ms = (time.perf_counter() - start) * 1e3
-        logger.debug(f"{self} read state: {dt_ms:.1f} ms")
-
-        # Capture images from cameras
-        for cam_key, _cam in self.cameras.items():
-            
-            start = time.perf_counter()
-
-            # obs_dict[cam_key] = cam.async_read()
-            for name, val in self.robot_dora_node.recv_images.items():
-                if cam_key in name:
-                    obs_dict[cam_key] = val
-            
-            # self.robot_dora_node.recv_images[name]
-            
-            dt_ms = (time.perf_counter() - start) * 1e3
-            logger.debug(f"{self} read {cam_key}: {dt_ms:.1f} ms")
-
-        return obs_dict
-
-    def send_action(self, action: dict[str, Any]) -> dict[str, Any]:
-        """The provided action is expected to be a vector."""
-        if not self.connected:
-            raise DeviceNotConnectedError(
-                f"{self} is not connected. You need to run `robot.connect()`."
-            )
-
-        goal_joint = [ val for key, val in action.items()]
-
+    def stop(self):
+        """安全停止节点"""
+        self.running = False
+        self.thread.join(timeout=1.0)
         
-        goal_joint_numpy = np.array(goal_joint, dtype=np.float32)
-        # goal_gripper_numpy = np.array([t.item() for t in goal_gripper], dtype=np.float32)
-        # position = np.concatenate([goal_joint_numpy, goal_gripper_numpy], axis=0)
-
-        # logger.debug(f"action: {action}, goal_joint:{goal_joint}, goal_joint_numpy:{goal_joint_numpy}")
-        self.robot_dora_node.dora_send(f"action_joint", goal_joint_numpy)
-        
-        return {f"{motor}.pos": val for motor, val in action.items()}
-
-    def update_status(self) -> str:
-
-        for i in range(self.status.specifications.camera.number):
-            match_name = self.status.specifications.camera.information[i].name
-            for name in self.robot_dora_node.recv_images_status:
-                if match_name in name:
-                    self.status.specifications.camera.information[i].is_connect = True if self.robot_dora_node.recv_images_status[name]>0 else False
-
-        for i in range(self.status.specifications.arm.number):
-            match_name = self.status.specifications.arm.information[i].name
-            for name in self.robot_dora_node.recv_joint_status:
-                if match_name in name:
-                    self.status.specifications.arm.information[i].is_connect = True if self.robot_dora_node.recv_joint_status[name]>0 else False
-
-        return self.status.to_json()
-
-    def disconnect(self):
-        if not self.connected:
-            raise DeviceNotConnectedError(
-                "Robot is not connected. You need to run `robot.connect()` before disconnecting."
-            )
-
-        self.robot_dora_node.running = False
-        self.robot_dora_node.stop()
-
-        self.connected = False
-
-    def __del__(self):
-        if getattr(self, "connected", False):
-            self.disconnect()
+        # 清空发送队列
+        while not self.send_queue.empty():
+            try:
+                self.send_queue.get_nowait()
+                self.send_queue.task_done()
+            except:
+                break
+                
+        logger.info(f"{self} stopped")

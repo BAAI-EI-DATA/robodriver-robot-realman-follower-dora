@@ -139,7 +139,7 @@ class RealManFollowerDoraRobotStatus(RobotStatus):
                     type="realman 主臂 7DOF",
                     start_pose=[],
                     joint_p_limit = [169.0, 102.0, 169.0, 52.0, 169.0, 117.0, 169.0],
-                    joint_p_limit = [-169.0, -102.0, -169.0, -167.0, -169.0, -87.0, -169.0],
+                    joint_n_limit = [-169.0, -102.0, -169.0, -167.0, -169.0, -87.0, -169.0],
                     is_connect=False
                 ),
                 ArmInfo(
@@ -147,7 +147,7 @@ class RealManFollowerDoraRobotStatus(RobotStatus):
                     type="realman 从臂 7DOF",
                     start_pose=[],
                     joint_p_limit = [169.0, 102.0, 169.0, 52.0, 169.0, 117.0, 169.0],
-                    joint_p_limit = [-169.0, -102.0, -169.0, -167.0, -169.0, -87.0, -169.0],
+                    joint_n_limit = [-169.0, -102.0, -169.0, -167.0, -169.0, -87.0, -169.0],
                     is_connect=False
                 ),
             ]
