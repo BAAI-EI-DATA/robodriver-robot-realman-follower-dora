@@ -98,9 +98,7 @@ def main():
                         continue
 
                 storage = pa.array(frame.ravel())
-                # 更新“有帧”时间戳
-                last_frame_ts = time.time()
-
+        
                 metadata["resolution"] = [int(rgb_intr.ppx), int(rgb_intr.ppy)]
                 metadata["focal_length"] = [int(rgb_intr.fx), int(rgb_intr.fy)]
                 # metadata["principal_point"] = [int(rgb_intr.ppx), int(rgb_intr.ppy)]
