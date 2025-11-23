@@ -105,14 +105,13 @@ class RealManFollowerDoraRobotNode(DoraRobotNode):
                 self._process_image(event_id, data, meta_data)
             elif 'joint' in event_id:
                 self._process_joint(event_id, data)
-
     def _process_image(self, event_id, data, meta_data):
         """处理图像数据"""
         encoding = meta_data["encoding"].lower()
         width = meta_data["width"]
         height = meta_data["height"]
         frame = None
-
+        
         try:
             if encoding == "bgr8":
                 frame = data.reshape((height, width, 3))
@@ -131,8 +130,8 @@ class RealManFollowerDoraRobotNode(DoraRobotNode):
     def _process_joint(self, event_id, data):
         """处理关节数据"""
         if data is not None:
-            scalar_value = float(data.item())
-            self.recv_joint[event_id] = scalar_value
+            # scalar_value = float(data.item()) 
+            self.recv_joint[event_id] = data # 接受的是列表
             self.recv_joint_status[event_id] = CONNECT_TIMEOUT_FRAME
 
     def start(self):
