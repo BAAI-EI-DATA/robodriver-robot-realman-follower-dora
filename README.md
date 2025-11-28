@@ -1,6 +1,22 @@
 # robodriver-robot-realman-follower-dora
----
-## Start
+## Get Start
+Clone the repository
 ```
-pip install -e .
+git clone --recurse-submodules https://github.com/BAAI-EI-DATA/robodriver-robot-realman-follower-dora.git && cd robodriver-robot-realman-follower-dora
+```
+Install uv:
+```
+pip install uv
+```
+Create and activate a virtual environment for realman dora node:
+```
+uv venv .venv -p 3.9
+source .venv/bin/activate
+```
+Install dependencies
+```
+uv pip install -e .
+```
+
+```
 ```
