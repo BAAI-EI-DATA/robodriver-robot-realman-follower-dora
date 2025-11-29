@@ -65,4 +65,11 @@ python robodriver/scripts/run.py \
 - When the  replay cannot play the video stream using rerun \
 *Open RoboDriver/robodriver/core/coordinator.py \
 Change the parameter mode="distant" of the visual_worker function to mode="local"* 
-  
+
+## Data Information
+RealMan robotic arm data is transmitted by the Dora node. Each robotic arm node sends **14-dimensional information** with the following composition:
+
+- Joint angles: Values of joints 1-7 (7 dimensions)
+- Gripper state: Gripper opening/closing degree 
+- End-effector pose: End Euler angles (3 dimensions, representing rotation around X/Y/Z axes)
+
