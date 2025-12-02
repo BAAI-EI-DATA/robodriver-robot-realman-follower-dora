@@ -69,7 +69,7 @@ class RobotStatus(draccus.ChoiceRegistry, abc.ABC):
         return json.dumps(self.to_dict(), ensure_ascii=False)
 
 
-@RobotStatus.register_subclass("realman_follower_dora")
+@RobotStatus.register_subclass("realman1_aio_dora")
 @dataclass
 class RealManFollowerDoraRobotStatus(RobotStatus):
     device_name: str = "RealMan_V1"

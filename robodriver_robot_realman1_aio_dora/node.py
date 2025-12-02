@@ -22,7 +22,7 @@ class DoraRobotNode(RobotNode):
 
 class RealManFollowerDoraRobotNode(DoraRobotNode):
     def __init__(self):
-        self.node = Node("realman_follower_dora")
+        self.node = Node("realman1_aio_dora")
         
         self.send_queue = queue.Queue(maxsize=100)
         self.recv_images: Dict[str, float] = {}

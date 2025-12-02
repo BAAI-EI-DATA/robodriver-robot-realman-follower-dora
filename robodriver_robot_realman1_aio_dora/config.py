@@ -24,7 +24,7 @@ from lerobot.cameras.opencv import OpenCVCameraConfig
 from lerobot.motors import Motor, MotorNormMode
 
 
-@RobotConfig.register_subclass("realman_follower_dora")
+@RobotConfig.register_subclass("realman1_aio_dora")
 @dataclass
 class RealManFollowerDoraRobotConfig(RobotConfig):
     use_degrees = True

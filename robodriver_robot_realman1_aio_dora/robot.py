@@ -20,7 +20,7 @@ logger = logging_mp.get_logger(__name__)
 
 class RealManFollowerDoraRobot(Robot):
     config_class = RealManFollowerDoraRobotConfig
-    name = "realman_follower_dora"
+    name = "realman1_aio_dora"
 
 
     def __init__(self, config: RealManFollowerDoraRobotConfig):

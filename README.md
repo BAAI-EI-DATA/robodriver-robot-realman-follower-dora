@@ -2,7 +2,7 @@
 ## Get Start
 Clone the repository
 ```
-git clone --recurse-submodules https://github.com/BAAI-EI-DATA/robodriver-robot-realman-follower-dora.git && cd robodriver-robot-realman-follower-dora
+git clone --recurse-submodules https://github.com/BAAI-EI-DATA/robodriver-robot-realman1-aio-dora.git && cd robodriver-robot-realman1-aio-dora
 ```
 Install uv:
 ```
@@ -21,13 +21,13 @@ Install the project to Robodriver
 ```
 cd /path/to/your/RoboDriver
 source .venv/bin/activate
-cd /path/to/your/robodriver-robot-realman-follower-dora
+cd /path/to/your/robodriver-robot-realman1-aio-dora
 uv pip install -e .
 source .venv/bin/activate
 ```
 Configure the dataflow.yml
 ```
-cd /path/to/your/robodriver-robot-realman-follower-dora
+cd /path/to/your/robodriver-robot-realman1-aio-dora
 cd dora
 ```
 Open the dataflow.yml file, then modify the VIRTUAL_ENV path, as well as DEVICE_SERIAL, ARM_IP, and ARM_PORT. 
@@ -50,7 +50,7 @@ dora up
 ```
 Start dataflow
 ```
-cd /path/to/your/robodriver-robot-realman-follower-dora
+cd /path/to/your/robodriver-robot-realman1-aio-dora
 dora start dora/dataflow.yml --uv
 ```
 Launch RoboXStudio
@@ -58,7 +58,7 @@ Launch RoboXStudio
 cd /path/to/your/RoboDriver
 source .venv/bin/activate
 python robodriver/scripts/run.py \
-  --robot.type=realman_follower_dora 
+  --robot.type=realman1_aio_dora 
 ```
 
 ##  
